@@ -87,7 +87,6 @@ class VolumeIoPriv(Structure):
 
 VOLUME_POISON = 0x13
 
-
 class Volume:
     _instances_ = weakref.WeakValueDictionary()
     _uuid_ = weakref.WeakValueDictionary()
@@ -518,14 +517,17 @@ class TraceDevice(Volume):
         if submit:
             self.vol.do_submit_flush(io)
 
+    def do_submit_discard(self, io):
+        submit = self._trace(io, TraceDevice.IoType.Discard)
+
+        if submit:
+            self.vol.do_submit_discard(io)
+
     def get_length(self):
         return self.vol.get_length()
 
     def get_max_io_size(self):
         return self.vol.get_max_io_size()
-
-    def do_submit_discard(self, discard):
-        return self.vol.do_submit_discard(discard)
 
     def dump(self, offset=0, size=0, ignore=VOLUME_POISON, **kwargs):
         return self.vol.dump(offset, size, ignore=ignore, **kwargs)
