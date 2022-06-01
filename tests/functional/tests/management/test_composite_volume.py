@@ -4,9 +4,18 @@
 #
 
 import pytest
+from ctypes import c_int
+
+from pyocf.types.volume import RamVolume, ErrorDevice, TraceDevice, IoFlags
+from pyocf.types.cvolume import CVolume
+from pyocf.types.data import Data
+from pyocf.types.io import IoDir
+from pyocf.types.shared import OcfError, OcfCompletion
+from pyocf.types.cache import Cache
+from pyocf.types.core import Core
+from pyocf.utils import Size as S
 
 
-@pytest.mark.skip(reason="not implemented")
 def test_create_composite_volume(pyocf_ctx):
     """
     title: Create composite volume.
@@ -26,10 +35,11 @@ def test_create_composite_volume(pyocf_ctx):
       - composite_volume::creation
       - composite_volume::adding_component_volume
     """
-    pass
+    with CVolume(pyocf_ctx) as cvol:
+        vol = RamVolume(S.from_MiB(1))
+        cvol.add(vol)
 
 
-@pytest.mark.skip(reason="not implemented")
 def test_add_subvolumes_of_different_types(pyocf_ctx):
     """
     title: Add subvolumes of different types.
@@ -49,10 +59,15 @@ def test_add_subvolumes_of_different_types(pyocf_ctx):
     requirements:
       - composite_volume::component_volume_types
     """
-    pass
+    vol1 = RamVolume(S.from_MiB(1))
+    vol2_backend = RamVolume(S.from_MiB(1))
+    vol2 = ErrorDevice(vol2_backend)
+
+    with CVolume(pyocf_ctx) as cvol:
+        cvol.add(vol1)
+        cvol.add(vol2)
 
 
-@pytest.mark.skip(reason="not implemented")
 def test_add_max_subvolumes(pyocf_ctx):
     """
     title: Add maximum number of subvolumes.
@@ -69,10 +84,38 @@ def test_add_max_subvolumes(pyocf_ctx):
     requirements:
       - composite_volume::max_composite_volumes
     """
-    pass
+
+    with CVolume(pyocf_ctx) as cvol:
+        for i in range(16):
+            vol = RamVolume(S.from_MiB(1))
+            cvol.add(vol)
+
+        vol = RamVolume(S.from_MiB(1))
+        with pytest.raises(OcfError):
+            cvol.add(vol)
 
 
-@pytest.mark.skip(reason="not implemented")
+def _cvol_io(cvol, addr, size, func, flags=0):
+    io = cvol.new_io(
+        queue=None,
+        addr=addr,
+        length=size,
+        direction=IoDir.WRITE,
+        io_class=0,
+        flags=flags,
+    )
+    completion = OcfCompletion([("err", c_int)])
+    io.callback = completion.callback
+    data = Data(byte_count=size)
+    io.set_data(data, 0)
+
+    submit_fn = getattr(io, func)
+    submit_fn()
+    completion.wait()
+
+    return int(completion.results["err"])
+
+
 def test_basic_volume_operations(pyocf_ctx):
     """
     title: Perform basic volume operations.
@@ -93,7 +136,62 @@ def test_basic_volume_operations(pyocf_ctx):
       - composite_volume::volume_api
       - composite_volume::io_request_passing
     """
-    pass
+    count = {"flush": 0, "discard": 0, "io": 0}
+    expected = {"flush": 0, "discard": 0, "io": 0}
+
+    pyocf_ctx.register_volume_type(TraceDevice)
+
+    addr = S.from_KiB(512).B
+    size = S.from_KiB(4).B
+
+    def trace(vol, io, io_type):
+        nonlocal addr
+        nonlocal size
+        nonlocal count
+
+        if (
+            io_type == TraceDevice.IoType.Flush
+            or int(io.contents._flags) & IoFlags.FLUSH
+        ):
+            count["flush"] += 1
+        elif io_type == TraceDevice.IoType.Discard:
+            count["discard"] += 1
+        else:
+            assert io_type == TraceDevice.IoType.Data
+            count["io"] += 1
+        assert io.contents._dir == IoDir.WRITE
+        assert io.contents._addr == addr
+        assert io.contents._bytes == size
+
+        return True
+
+    backend = RamVolume(S.from_MiB(1))
+    trace_dev = TraceDevice(backend, trace_fcn=trace)
+
+    with CVolume(pyocf_ctx) as cvol:
+        cvol.add(trace_dev)
+
+        cvol.open()
+
+        # verify data properly propagated
+        ret = _cvol_io(cvol, addr, size, "submit")
+        assert ret == 0
+        expected["io"] += 1
+        assert expected == count
+
+        # verify flush properly propagated
+        ret = _cvol_io(cvol, addr, size, "submit_flush", IoFlags.FLUSH)
+        assert ret == 0
+        expected["flush"] += 1
+        assert expected == count
+
+        # verify discard properly propagated
+        ret = _cvol_io(cvol, addr, size, "submit_discard")
+        assert ret == 0
+        expected["discard"] += 1
+        assert expected == count
+
+        cvol.close()
 
 
 @pytest.mark.skip(reason="not implemented")
@@ -228,7 +326,6 @@ def test_io_completion(pyocf_ctx):
     pass
 
 
-@pytest.mark.skip(reason="not implemented")
 def test_attach(pyocf_ctx):
     """
     title: Attach composite volume.
@@ -248,10 +345,26 @@ def test_attach(pyocf_ctx):
     requirements:
       - composite_volume::cache_attach_load
     """
-    pass
+
+    with CVolume(pyocf_ctx) as cvol:
+        for i in range(16):
+            vol = RamVolume(S.from_MiB(3))
+            cvol.add(vol)
+
+        cache = Cache.start_on_device(cvol)
+
+        core_device = RamVolume(S.from_MiB(20))
+        core = Core.using_device(core_device)
+
+        stats = cache.get_stats()
+        assert stats["conf"]["attached"] == True
+
+        cache.stop()
+        assert (
+            Cache.get_cache_by_name(pyocf_ctx, "cache1") != 0
+        ), "Try getting cache after stopping it"
 
 
-@pytest.mark.skip(reason="not implemented")
 def test_load(pyocf_ctx):
     """
     title: Load composite volume.
@@ -273,4 +386,83 @@ def test_load(pyocf_ctx):
     requirements:
       - composite_volume::cache_attach_load
     """
-    pass
+    with CVolume(pyocf_ctx) as cvol:
+        for i in range(16):
+            vol = RamVolume(S.from_MiB(3))
+            cvol.add(vol)
+
+        cache = Cache.start_on_device(cvol)
+
+        core_device = RamVolume(S.from_MiB(20))
+        core = Core.using_device(core_device)
+
+        cache.add(core)
+
+        vol = CoreVolume(core, open=True)
+        write_data = Data.from_string("Verify load")
+        io = vol.new_io(
+            cache.get_default_queue(),
+            S.from_sector(3).B,
+            write_data.size,
+            IoDir.WRITE,
+            0,
+            0,
+        )
+        io.set_data(write_data)
+        cmpl = OcfCompletion([("err", c_int)])
+        io.callback = cmpl.callback
+        io.submit()
+        cmpl.wait()
+
+        cache.stop()
+
+        cache = Cache.load_from_device(cache_device, open_cores=False)
+
+        stats = cache.get_stats()
+        assert stats["conf"]["attached"] == True
+
+        read_data = Data(write_data.size)
+        io = vol.new_io(
+            cache.get_default_queue(),
+            S.from_sector(3).B,
+            read_data.size,
+            IoDir.READ,
+            0,
+            0,
+        )
+        io.set_data(read_data)
+
+        cmpl = OcfCompletion([("err", c_int)])
+        io.callback = cmpl.callback
+        io.submit()
+        cmpl.wait()
+
+        """
+        # composite volume API approach
+        cvol.open()
+
+        io = cvol.new_io(
+            queue=None,
+            addr=S.from_KiB(512).B,
+            length=S.from_KiB(4).B,
+            direction=IoDir.WRITE,
+            io_class=0,
+            flags=0,
+        )
+
+        completion = OcfCompletion([("err", c_int)])
+        io.callback = completion.callback
+        data = Data(byte_count=bytes(4096))
+        io.set_data(data)
+        io.submit()
+        completio.wait()
+
+        cvol.close()
+        assert int(completion.results["err"]) == 0
+        cache
+        """
+
+        cache.stop()
+        assert (
+            Cache.get_cache_by_name(pyocf_ctx, "cache1") != 0
+        ), "Try getting cache after stopping it"
